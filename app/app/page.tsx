@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { chatGPTSignOutPath, requireChatGPTUser } from "../chatgpt-auth";
+import { isConfiguredAdmin } from "../../lib/admin-auth";
 import { OrganizerApp } from "./OrganizerApp";
 
 export const dynamic = "force-dynamic";
@@ -17,6 +18,7 @@ export default async function DashboardPage() {
       user={{ displayName: user.displayName, email: user.email }}
       signOutHref={chatGPTSignOutPath("/")}
       nowIso={new Date().toISOString()}
+      adminEligible={isConfiguredAdmin(user)}
     />
   );
 }

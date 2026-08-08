@@ -65,3 +65,26 @@ export const events = sqliteTable(
     index("idx_events_owner_starts").on(table.ownerId, table.startsAt),
   ],
 );
+
+export const adminLoginLimits = sqliteTable("admin_login_limits", {
+  subject: text("subject").primaryKey(),
+  windowStartedAt: integer("window_started_at").notNull(),
+  failures: integer("failures").notNull().default(0),
+  lockedUntil: integer("locked_until"),
+  updatedAt: text("updated_at").notNull().default(sql.raw("CURRENT_TIMESTAMP")),
+});
+
+export const adminAuditLogs = sqliteTable(
+  "admin_audit_logs",
+  {
+    id: text("id").primaryKey(),
+    subject: text("subject").notNull(),
+    action: text("action", {
+      enum: ["login_success", "login_failure", "logout"],
+    }).notNull(),
+    createdAt: text("created_at").notNull().default(sql.raw("CURRENT_TIMESTAMP")),
+  },
+  (table) => [
+    index("idx_admin_audit_subject_created").on(table.subject, table.createdAt),
+  ],
+);

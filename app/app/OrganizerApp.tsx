@@ -21,8 +21,9 @@ import type {
   TaskPriority,
   TaskStatus,
 } from "../../lib/organizer-types";
+import type { AdminOverview } from "../../lib/admin-types";
 
-type View = "overview" | "tasks" | "notes" | "agenda";
+type View = "overview" | "tasks" | "notes" | "agenda" | "admin";
 
 type OrganizerAppProps = {
   user: {
@@ -31,6 +32,7 @@ type OrganizerAppProps = {
   };
   signOutHref: string;
   nowIso: string;
+  adminEligible: boolean;
 };
 
 const emptyData: OrganizerData = {
@@ -56,6 +58,15 @@ const priorityLabels: Record<TaskPriority, string> = {
   low: "Baixa",
   medium: "Média",
   high: "Alta",
+};
+
+const adminActivityLabels: Record<
+  AdminOverview["recentActivity"][number]["action"],
+  string
+> = {
+  login_success: "Painel desbloqueado",
+  login_failure: "Tentativa recusada",
+  logout: "Painel bloqueado",
 };
 
 const dateFormatter = new Intl.DateTimeFormat("pt-BR", {
@@ -172,7 +183,12 @@ function EmptyState({
   );
 }
 
-export function OrganizerApp({ user, signOutHref, nowIso }: OrganizerAppProps) {
+export function OrganizerApp({
+  user,
+  signOutHref,
+  nowIso,
+  adminEligible,
+}: OrganizerAppProps) {
   const now = useMemo(() => new Date(nowIso), [nowIso]);
   const name = firstName(user.displayName, user.email);
   const [data, setData] = useState<OrganizerData>(emptyData);
@@ -185,6 +201,13 @@ export function OrganizerApp({ user, signOutHref, nowIso }: OrganizerAppProps) {
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState("");
   const [toast, setToast] = useState("");
+  const [adminOverview, setAdminOverview] = useState<AdminOverview | null>(null);
+  const [adminStatus, setAdminStatus] = useState<
+    "idle" | "checking" | "locked" | "ready"
+  >("idle");
+  const [adminError, setAdminError] = useState("");
+  const [adminSubmitting, setAdminSubmitting] = useState(false);
+  const [showAdminPassword, setShowAdminPassword] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -207,6 +230,34 @@ export function OrganizerApp({ user, signOutHref, nowIso }: OrganizerAppProps) {
       setLoading(false);
     }
   }, []);
+
+  const loadAdminOverview = useCallback(async () => {
+    if (!adminEligible) return;
+    setAdminStatus("checking");
+    setAdminError("");
+    try {
+      const response = await fetch("/api/admin/overview", {
+        cache: "no-store",
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+      });
+      const body = (await response.json()) as AdminOverview & { error?: string };
+      if (response.status === 401) {
+        setAdminOverview(null);
+        setAdminStatus("locked");
+        return;
+      }
+      if (!response.ok) throw new Error(body.error || "O painel admin não respondeu.");
+      setAdminOverview(body);
+      setAdminStatus("ready");
+    } catch (error) {
+      setAdminOverview(null);
+      setAdminStatus("locked");
+      setAdminError(
+        error instanceof Error ? error.message : "O painel admin não respondeu.",
+      );
+    }
+  }, [adminEligible]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -498,10 +549,65 @@ export function OrganizerApp({ user, signOutHref, nowIso }: OrganizerAppProps) {
     }
   }
 
+  async function handleAdminLogin(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const password = String(new FormData(form).get("password") ?? "");
+    setAdminSubmitting(true);
+    setAdminError("");
+    try {
+      const response = await fetch("/api/admin/session", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      const body = (await response.json()) as { error?: string };
+      if (!response.ok) {
+        throw new Error(body.error || "Não foi possível liberar o painel.");
+      }
+      form.reset();
+      setShowAdminPassword(false);
+      await loadAdminOverview();
+      setToast("Painel administrativo desbloqueado.");
+    } catch (error) {
+      setAdminStatus("locked");
+      setAdminError(
+        error instanceof Error ? error.message : "Não foi possível liberar o painel.",
+      );
+    } finally {
+      setAdminSubmitting(false);
+    }
+  }
+
+  async function lockAdminPanel() {
+    setAdminSubmitting(true);
+    setAdminError("");
+    try {
+      const response = await fetch("/api/admin/session", {
+        method: "DELETE",
+        credentials: "same-origin",
+      });
+      const body = (await response.json()) as { error?: string };
+      if (!response.ok) throw new Error(body.error || "Não foi possível bloquear o painel.");
+      setAdminOverview(null);
+      setAdminStatus("locked");
+      setToast("Painel administrativo bloqueado.");
+    } catch (error) {
+      setAdminError(
+        error instanceof Error ? error.message : "Não foi possível bloquear o painel.",
+      );
+    } finally {
+      setAdminSubmitting(false);
+    }
+  }
+
   function selectView(view: View) {
+    if (view === "admin" && !adminEligible) return;
     setActiveView(view);
     setQuery("");
     if (view === "tasks") setTaskFilter("open");
+    if (view === "admin") void loadAdminOverview();
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -625,6 +731,21 @@ export function OrganizerApp({ user, signOutHref, nowIso }: OrganizerAppProps) {
             </button>
           ))}
         </nav>
+        {adminEligible ? (
+          <div className="owner-admin">
+            <p>PROPRIETÁRIO</p>
+            <button
+              type="button"
+              className={activeView === "admin" ? "active" : ""}
+              aria-current={activeView === "admin" ? "page" : undefined}
+              onClick={() => selectView("admin")}
+            >
+              <span aria-hidden="true">◆</span>
+              <span><strong>Admin</strong><small>Centro de controle</small></span>
+              <b>ADM</b>
+            </button>
+          </div>
+        ) : null}
         <div className="sidebar-security">
           <span aria-hidden="true">◎</span>
           <p><strong>Espaço protegido</strong><small>Dados privados por conta</small></p>
@@ -655,28 +776,197 @@ export function OrganizerApp({ user, signOutHref, nowIso }: OrganizerAppProps) {
           <button className="top-add" type="button" onClick={() => openModal("task")}>
             <span>＋</span> Novo item
           </button>
+          {adminEligible ? (
+            <button
+              className={"top-admin " + (activeView === "admin" ? "active" : "")}
+              type="button"
+              onClick={() => selectView("admin")}
+              aria-label="Abrir painel administrativo"
+            >
+              ◆ <span>Admin</span>
+            </button>
+          ) : null}
           <span className="top-avatar" title={user.email}>{initials(name)}</span>
         </header>
 
         <div className="app-page">
           <div className="page-heading">
             <div>
-              <p>{dateFormatter.format(now).toLocaleUpperCase("pt-BR")}</p>
-              <h1>{greetingFor(now)}, {name}.</h1>
-              <span>
-                {openTasks.length === 0
-                  ? "Tudo tranquilo por aqui. Aproveite o espaço."
-                  : openTasks.length === 1
-                    ? "Uma coisa pede sua atenção."
-                    : openTasks.length + " coisas pedem sua atenção."}
-              </span>
+              {activeView === "admin" ? (
+                <>
+                  <p>ACESSO DO PROPRIETÁRIO</p>
+                  <h1>Centro de controle.</h1>
+                  <span>Segurança e visão geral do THEUS, sem expor conteúdo pessoal.</span>
+                </>
+              ) : (
+                <>
+                  <p>{dateFormatter.format(now).toLocaleUpperCase("pt-BR")}</p>
+                  <h1>{greetingFor(now)}, {name}.</h1>
+                  <span>
+                    {openTasks.length === 0
+                      ? "Tudo tranquilo por aqui. Aproveite o espaço."
+                      : openTasks.length === 1
+                        ? "Uma coisa pede sua atenção."
+                        : openTasks.length + " coisas pedem sua atenção."}
+                  </span>
+                </>
+              )}
             </div>
-            <button className="button button-red mobile-new" type="button" onClick={() => openModal("task")}>
-              + Novo item
-            </button>
+            {activeView !== "admin" ? (
+              <button className="button button-red mobile-new" type="button" onClick={() => openModal("task")}>
+                + Novo item
+              </button>
+            ) : null}
           </div>
 
-          {loadError ? (
+          {activeView === "admin" && adminEligible ? (
+            <section className="admin-view" aria-labelledby="admin-view-title">
+              <div className="admin-view-head">
+                <div>
+                  <span>THEUS / ADMIN</span>
+                  <h2 id="admin-view-title">Painel do proprietário</h2>
+                  <p>Acesso elevado, protegido por uma segunda verificação.</p>
+                </div>
+                <span className="admin-readonly">SOMENTE LEITURA</span>
+              </div>
+
+              {adminStatus === "checking" ? (
+                <div className="admin-loading" role="status">
+                  <span aria-hidden="true">◆</span>
+                  <p><strong>Verificando sua sessão…</strong><small>Um instante.</small></p>
+                </div>
+              ) : adminStatus === "ready" && adminOverview ? (
+                <>
+                  <div className="admin-session-bar">
+                    <div>
+                      <span aria-hidden="true">●</span>
+                      <p>
+                        <strong>Admin desbloqueado</strong>
+                        <small>
+                          Sessão protegida até {timeFormatter.format(new Date(adminOverview.sessionExpiresAt))}
+                        </small>
+                      </p>
+                    </div>
+                    <div>
+                      <button type="button" onClick={() => void loadAdminOverview()}>
+                        ↻ Atualizar
+                      </button>
+                      <button type="button" onClick={() => void lockAdminPanel()} disabled={adminSubmitting}>
+                        ◇ Bloquear painel
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="admin-metrics" aria-label="Métricas do THEUS">
+                    <article className="admin-metric admin-metric-primary">
+                      <span>ESPAÇOS COM CONTEÚDO</span>
+                      <strong>{adminOverview.counts.spacesWithContent}</strong>
+                      <small>contas que já guardaram algo</small>
+                    </article>
+                    <article className="admin-metric">
+                      <span>TAREFAS</span>
+                      <strong>{adminOverview.counts.tasks}</strong>
+                      <small>{adminOverview.counts.openTasks} abertas · {adminOverview.counts.completedTasks} concluídas</small>
+                    </article>
+                    <article className="admin-metric">
+                      <span>NOTAS</span>
+                      <strong>{adminOverview.counts.notes}</strong>
+                      <small>itens guardados</small>
+                    </article>
+                    <article className="admin-metric">
+                      <span>EVENTOS</span>
+                      <strong>{adminOverview.counts.events}</strong>
+                      <small>compromissos cadastrados</small>
+                    </article>
+                  </div>
+
+                  <div className="admin-grid">
+                    <section className="admin-panel">
+                      <div className="admin-panel-head">
+                        <div><span>SAÚDE DO SISTEMA</span><h3>Proteções ativas</h3></div>
+                        <b>OPERACIONAL</b>
+                      </div>
+                      <ul className="admin-health-list">
+                        <li><i>✓</i><span><strong>Banco conectado</strong><small>D1 persistente e isolado por conta</small></span><b>OK</b></li>
+                        <li><i>✓</i><span><strong>Login do proprietário</strong><small>Identidade da conta + senha administrativa</small></span><b>OK</b></li>
+                        <li><i>✓</i><span><strong>Sessão curta</strong><small>Cookie assinado, privado e com expiração automática</small></span><b>15 MIN</b></li>
+                        <li className={adminOverview.counts.blockedLogins ? "is-warning" : ""}>
+                          <i>{adminOverview.counts.blockedLogins ? "!" : "✓"}</i>
+                          <span><strong>Proteção contra tentativas</strong><small>Bloqueio temporário após falhas repetidas</small></span>
+                          <b>{adminOverview.counts.blockedLogins ? adminOverview.counts.blockedLogins + " BLOQ." : "LIVRE"}</b>
+                        </li>
+                      </ul>
+                    </section>
+
+                    <section className="admin-panel">
+                      <div className="admin-panel-head">
+                        <div><span>TRILHA DE SEGURANÇA</span><h3>Atividade recente</h3></div>
+                      </div>
+                      {adminOverview.recentActivity.length ? (
+                        <ol className="admin-activity-list">
+                          {adminOverview.recentActivity.map((activity) => (
+                            <li key={activity.id}>
+                              <i className={activity.action === "login_failure" ? "failure" : ""} aria-hidden="true" />
+                              <span><strong>{adminActivityLabels[activity.action]}</strong><small>Conta proprietária</small></span>
+                              <time dateTime={activity.createdAt}>
+                                {shortDateFormatter.format(new Date(activity.createdAt))} · {timeFormatter.format(new Date(activity.createdAt))}
+                              </time>
+                            </li>
+                          ))}
+                        </ol>
+                      ) : (
+                        <div className="admin-activity-empty">Nenhuma atividade administrativa registrada ainda.</div>
+                      )}
+                    </section>
+                  </div>
+                  {adminError ? <p className="admin-error" role="alert">{adminError}</p> : null}
+                </>
+              ) : (
+                <div className="admin-unlock-layout">
+                  <div className="admin-unlock-card">
+                    <span className="admin-lock-icon" aria-hidden="true">◆</span>
+                    <p>SEGUNDA VERIFICAÇÃO</p>
+                    <h3>Confirme que é você.</h3>
+                    <span className="admin-unlock-copy">
+                      Sua conta já foi reconhecida como proprietária. Agora use a senha administrativa para liberar este painel por 15 minutos.
+                    </span>
+                    <form onSubmit={handleAdminLogin}>
+                      <label htmlFor="admin-password">Senha administrativa</label>
+                      <div className="admin-password-field">
+                        <input
+                          id="admin-password"
+                          name="password"
+                          type={showAdminPassword ? "text" : "password"}
+                          autoComplete="current-password"
+                          maxLength={512}
+                          required
+                          aria-describedby={adminError ? "admin-error" : "admin-password-help"}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowAdminPassword((visible) => !visible)}
+                          aria-label={showAdminPassword ? "Ocultar senha" : "Mostrar senha"}
+                        >
+                          {showAdminPassword ? "Ocultar" : "Mostrar"}
+                        </button>
+                      </div>
+                      <small id="admin-password-help">A senha é verificada apenas no servidor.</small>
+                      {adminError ? <p id="admin-error" className="admin-error" role="alert">{adminError}</p> : null}
+                      <button className="button button-red" type="submit" disabled={adminSubmitting}>
+                        {adminSubmitting ? "Verificando…" : "Desbloquear painel →"}
+                      </button>
+                    </form>
+                  </div>
+                  <aside className="admin-guardrails">
+                    <p>COMO ESTE ACESSO É PROTEGIDO</p>
+                    <div><span>01</span><p><strong>Só na sua conta</strong><small>O botão nem aparece para outros usuários.</small></p></div>
+                    <div><span>02</span><p><strong>Senha fora do código</strong><small>O hash da credencial fica protegido no ambiente do servidor.</small></p></div>
+                    <div><span>03</span><p><strong>Expira sozinho</strong><small>O acesso elevado é encerrado após 15 minutos.</small></p></div>
+                  </aside>
+                </div>
+              )}
+            </section>
+          ) : loadError ? (
             <div className="load-error" role="alert">
               <span>!</span>
               <div><strong>Seu espaço não carregou.</strong><p>{loadError}</p></div>
@@ -836,37 +1126,58 @@ export function OrganizerApp({ user, signOutHref, nowIso }: OrganizerAppProps) {
       </main>
 
       <aside className="context-panel">
-        <div className="context-head">
-          <p>CAPTURA RÁPIDA</p>
-          <h2>O que você quer guardar?</h2>
-          <button type="button" onClick={() => openModal("task")}>
-            Escreva uma ideia, tarefa ou compromisso…
-          </button>
-          <div>
-            <button type="button" onClick={() => openModal("task")}>✓ Tarefa</button>
-            <button type="button" onClick={() => openModal("note")}>□ Nota</button>
-            <button type="button" onClick={() => openModal("event")}>◷ Evento</button>
-          </div>
-        </div>
-        <div className="context-block">
-          <div className="context-title"><span>HOJE</span><b>{todayTasks.length}</b></div>
-          {todayTasks.slice(0, 3).map((task) => (
-            <button className="context-task" type="button" onClick={() => selectView("tasks")} key={task.id}>
-              <i className={"priority-dot " + task.priority} />
-              <span><strong>{task.title}</strong><small>{formatTaskDate(task.dueAt, now)}</small></span>
-            </button>
-          ))}
-          {!todayTasks.length ? <p className="context-empty">Sem pendências para hoje.</p> : null}
-        </div>
-        <div className="context-block">
-          <div className="context-title"><span>VISÃO GERAL</span></div>
-          <div className="context-stats">
-            <div><strong>{openTasks.length}</strong><span>tarefas abertas</span></div>
-            <div><strong>{data.notes.length}</strong><span>notas guardadas</span></div>
-            <div><strong>{upcomingEvents.length}</strong><span>eventos futuros</span></div>
-          </div>
-        </div>
-        <div className="context-sync"><span>●</span><p><strong>Tudo sincronizado</strong><small>Seu espaço está salvo e protegido.</small></p></div>
+        {activeView === "admin" && adminEligible ? (
+          <>
+            <div className="context-head admin-context-head">
+              <p>MODO PROPRIETÁRIO</p>
+              <h2>Controle sem invadir.</h2>
+              <span>O painel mostra totais e sinais de segurança, nunca o conteúdo pessoal das contas.</span>
+            </div>
+            <div className="context-block">
+              <div className="context-title"><span>CAMADAS ATIVAS</span></div>
+              <div className="admin-context-layers">
+                <div><i>1</i><span><strong>Conta autenticada</strong><small>Sign in with ChatGPT</small></span></div>
+                <div><i>2</i><span><strong>Senha administrativa</strong><small>Hash protegido no servidor</small></span></div>
+                <div><i>3</i><span><strong>Sessão assinada</strong><small>Expiração automática</small></span></div>
+              </div>
+            </div>
+            <div className="context-sync"><span>●</span><p><strong>Visão somente leitura</strong><small>Nenhuma ação destrutiva neste painel.</small></p></div>
+          </>
+        ) : (
+          <>
+            <div className="context-head">
+              <p>CAPTURA RÁPIDA</p>
+              <h2>O que você quer guardar?</h2>
+              <button type="button" onClick={() => openModal("task")}>
+                Escreva uma ideia, tarefa ou compromisso…
+              </button>
+              <div>
+                <button type="button" onClick={() => openModal("task")}>✓ Tarefa</button>
+                <button type="button" onClick={() => openModal("note")}>□ Nota</button>
+                <button type="button" onClick={() => openModal("event")}>◷ Evento</button>
+              </div>
+            </div>
+            <div className="context-block">
+              <div className="context-title"><span>HOJE</span><b>{todayTasks.length}</b></div>
+              {todayTasks.slice(0, 3).map((task) => (
+                <button className="context-task" type="button" onClick={() => selectView("tasks")} key={task.id}>
+                  <i className={"priority-dot " + task.priority} />
+                  <span><strong>{task.title}</strong><small>{formatTaskDate(task.dueAt, now)}</small></span>
+                </button>
+              ))}
+              {!todayTasks.length ? <p className="context-empty">Sem pendências para hoje.</p> : null}
+            </div>
+            <div className="context-block">
+              <div className="context-title"><span>VISÃO GERAL</span></div>
+              <div className="context-stats">
+                <div><strong>{openTasks.length}</strong><span>tarefas abertas</span></div>
+                <div><strong>{data.notes.length}</strong><span>notas guardadas</span></div>
+                <div><strong>{upcomingEvents.length}</strong><span>eventos futuros</span></div>
+              </div>
+            </div>
+            <div className="context-sync"><span>●</span><p><strong>Tudo sincronizado</strong><small>Seu espaço está salvo e protegido.</small></p></div>
+          </>
+        )}
       </aside>
 
       <nav className="mobile-bottom-nav" aria-label="Navegação móvel">

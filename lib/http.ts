@@ -39,14 +39,30 @@ export async function readJsonBody<T>(request: Request): Promise<T | null> {
   }
 }
 
-export function apiJson(body: unknown, status = 200): Response {
+export function apiJson(
+  body: unknown,
+  status = 200,
+  headers?: HeadersInit,
+): Response {
   return Response.json(body, {
     status,
     headers: {
       "Cache-Control": "private, no-store",
       "X-Content-Type-Options": "nosniff",
+      ...headers,
     },
   });
+}
+
+export function isStrictSameOrigin(request: Request): boolean {
+  const origin = request.headers.get("origin");
+  if (!origin) return false;
+
+  try {
+    return new URL(origin).origin === new URL(request.url).origin;
+  } catch {
+    return false;
+  }
 }
 
 export function isShortText(
