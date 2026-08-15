@@ -161,6 +161,19 @@ export async function createEvent(
   return toEvent(row);
 }
 
+export async function getEvent(
+  ownerId: string,
+  id: string,
+): Promise<CalendarEvent | null> {
+  const row = await getDb()
+    .select()
+    .from(events)
+    .where(and(eq(events.id, id), eq(events.ownerId, ownerId)))
+    .limit(1)
+    .then((rows) => rows[0]);
+  return row ? toEvent(row) : null;
+}
+
 export async function updateTask(
   ownerId: string,
   id: string,

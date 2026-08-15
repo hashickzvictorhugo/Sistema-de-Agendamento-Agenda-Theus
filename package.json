@@ -9,7 +9,9 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "vinext build && node --test tests/rendered-html.test.mjs",
+    "test": "vinext build && npm run test:unit",
+    "test:unit": "node --import=./tests/support/register-hooks.mjs --experimental-strip-types --test --test-isolation=none tests/admin-security.test.mjs tests/rendered-html.test.mjs",
+    "ci": "npm run lint && npm run typecheck && npm run build && npm run test:unit",
     "typecheck": "tsc --noEmit --incremental false",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"

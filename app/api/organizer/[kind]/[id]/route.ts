@@ -1,5 +1,6 @@
 import {
   deleteOrganizerItem,
+  getEvent,
   updateEvent,
   updateNote,
   updateTask,
@@ -11,7 +12,7 @@ import {
   apiJson,
   getApiUser,
   isShortText,
-  isTrustedMutation,
+  isStrictSameOrigin,
   optionalDate,
   readJsonBody,
 } from "../../../../../lib/http";
@@ -46,7 +47,7 @@ function cleanText(value: unknown, maxLength: number, allowEmpty = false) {
 export async function PATCH(request: Request, context: RouteContext) {
   const user = await getApiUser();
   if (!user) return apiJson({ error: "Faça login para continuar." }, 401);
-  if (!isTrustedMutation(request)) {
+  if (!isStrictSameOrigin(request)) {
     return apiJson({ error: "Origem da solicitação não permitida." }, 403);
   }
 
@@ -138,12 +139,14 @@ export async function PATCH(request: Request, context: RouteContext) {
       if (typeof payload.allDay !== "boolean") return apiJson({ error: "Valor inválido." }, 400);
       input.allDay = payload.allDay;
     }
-    if (
-      input.startsAt &&
-      input.endsAt &&
-      new Date(input.endsAt) < new Date(input.startsAt)
-    ) {
-      return apiJson({ error: "O fim deve acontecer depois do início." }, 400);
+    if ("startsAt" in input || "endsAt" in input) {
+      const current = await getEvent(user.userId, id);
+      if (!current) return apiJson({ error: "Item não encontrado." }, 404);
+      const resultingStart = input.startsAt ?? current.startsAt;
+      const resultingEnd = "endsAt" in input ? input.endsAt : current.endsAt;
+      if (resultingEnd && new Date(resultingEnd) < new Date(resultingStart)) {
+        return apiJson({ error: "O fim deve acontecer depois do início." }, 400);
+      }
     }
     if (!Object.keys(input).length) return apiJson({ error: "Nada para atualizar." }, 400);
     const item = await updateEvent(user.userId, id, input);
@@ -157,7 +160,7 @@ export async function PATCH(request: Request, context: RouteContext) {
 export async function DELETE(request: Request, context: RouteContext) {
   const user = await getApiUser();
   if (!user) return apiJson({ error: "Faça login para continuar." }, 401);
-  if (!isTrustedMutation(request)) {
+  if (!isStrictSameOrigin(request)) {
     return apiJson({ error: "Origem da solicitação não permitida." }, 403);
   }
 

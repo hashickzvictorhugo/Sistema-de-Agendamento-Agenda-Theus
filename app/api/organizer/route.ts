@@ -8,7 +8,7 @@ import {
   apiJson,
   getApiUser,
   isShortText,
-  isTrustedMutation,
+  isStrictSameOrigin,
   optionalDate,
   readJsonBody,
 } from "../../../lib/http";
@@ -52,7 +52,7 @@ export async function GET() {
 export async function POST(request: Request) {
   const user = await getApiUser();
   if (!user) return apiJson({ error: "Faça login para continuar." }, 401);
-  if (!isTrustedMutation(request)) {
+  if (!isStrictSameOrigin(request)) {
     return apiJson({ error: "Origem da solicitação não permitida." }, 403);
   }
 

@@ -88,3 +88,20 @@ export const adminAuditLogs = sqliteTable(
     index("idx_admin_audit_subject_created").on(table.subject, table.createdAt),
   ],
 );
+
+export const adminSessions = sqliteTable(
+  "admin_sessions",
+  {
+    nonce: text("nonce").primaryKey(),
+    subject: text("subject").notNull(),
+    expiresAt: integer("expires_at").notNull(),
+    revokedAt: integer("revoked_at"),
+    createdAt: text("created_at").notNull().default(sql.raw("CURRENT_TIMESTAMP")),
+  },
+  (table) => [
+    index("idx_admin_sessions_subject_expires").on(
+      table.subject,
+      table.expiresAt,
+    ),
+  ],
+);
