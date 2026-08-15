@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import type { ChatGPTUser } from "../app/chatgpt-auth";
+import { isAdminSessionActive } from "../db/admin";
 
 const COOKIE_NAME = "__Host-theus_admin";
 const SESSION_AUDIENCE = "theus-admin-v1";
@@ -20,13 +20,15 @@ type PasswordHash = {
   hash: Uint8Array;
 };
 
-export function isConfiguredAdmin(user: Pick<ChatGPTUser, "email">): boolean {
-  const ownerEmail = env.ADMIN_OWNER_EMAIL?.trim().toLocaleLowerCase("en-US");
+type AdminIdentity = { userId: string };
+
+export function isConfiguredAdmin(user: AdminIdentity): boolean {
+  const ownerUserId = env.ADMIN_OWNER_USER_ID?.trim();
   return Boolean(
-    ownerEmail &&
+    ownerUserId &&
       env.ADMIN_PASSWORD_HASH &&
-      env.ADMIN_SESSION_SECRET &&
-      user.email.trim().toLocaleLowerCase("en-US") === ownerEmail,
+      getSessionSecret() &&
+      user.userId === ownerUserId,
   );
 }
 
@@ -71,8 +73,9 @@ export async function verifyAdminPassword(input: unknown): Promise<boolean> {
 export async function createAdminSession(userId: string): Promise<{
   token: string;
   expiresAt: number;
+  nonce: string;
 }> {
-  const secret = env.ADMIN_SESSION_SECRET;
+  const secret = getSessionSecret();
   if (!secret || !userId) throw new Error("Admin access is not configured.");
 
   const now = Math.floor(Date.now() / 1000);
@@ -87,14 +90,18 @@ export async function createAdminSession(userId: string): Promise<{
     new TextEncoder().encode(JSON.stringify(payload)),
   );
   const signature = await sign(encodedPayload, secret);
-  return { token: `${encodedPayload}.${signature}`, expiresAt: payload.exp };
+  return {
+    token: `${encodedPayload}.${signature}`,
+    expiresAt: payload.exp,
+    nonce: payload.nonce,
+  };
 }
 
 export async function verifyAdminSession(
   request: Request,
   userId: string,
 ): Promise<AdminSessionPayload | null> {
-  const secret = env.ADMIN_SESSION_SECRET;
+  const secret = getSessionSecret();
   if (!secret || !userId) return null;
 
   const token = readSingleCookie(request.headers.get("cookie"), COOKIE_NAME);
@@ -127,10 +134,20 @@ export async function verifyAdminSession(
     ) {
       return null;
     }
-    return payload as AdminSessionPayload;
+    const session = payload as AdminSessionPayload;
+    if (!(await isAdminSessionActive(userId, session.nonce, now))) {
+      return null;
+    }
+    return session;
   } catch {
     return null;
   }
+}
+
+function getSessionSecret(): string | null {
+  const secret = env.ADMIN_SESSION_SECRET;
+  if (!secret) return null;
+  return new TextEncoder().encode(secret).byteLength >= 32 ? secret : null;
 }
 
 export function adminSessionCookie(token: string, maxAge = SESSION_MAX_AGE_SECONDS): string {
@@ -158,7 +175,7 @@ function parsePasswordHash(value: string | undefined): PasswordHash | null {
     algorithm !== "pbkdf2-sha256" ||
     extra !== undefined ||
     !Number.isInteger(iterations) ||
-    iterations < 100_000 ||
+    iterations < 600_000 ||
     iterations > 1_000_000 ||
     !salt ||
     salt.byteLength < 16 ||

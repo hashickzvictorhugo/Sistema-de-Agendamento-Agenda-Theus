@@ -10,6 +10,12 @@ type LimitRow = {
   lockedUntil: number | null;
 };
 
+export type AdminLoginAttempt = {
+  allowed: boolean;
+  attemptNumber: number;
+  retryAfterSeconds: number;
+};
+
 type MetricsRow = {
   spacesWithContent: number;
   tasks: number;
@@ -43,10 +49,10 @@ export async function getAdminLock(
   };
 }
 
-export async function recordAdminLoginFailure(
+export async function reserveAdminLoginAttempt(
   subject: string,
   now = Date.now(),
-): Promise<{ locked: boolean; retryAfterSeconds: number }> {
+): Promise<AdminLoginAttempt> {
   const nowIso = new Date(now).toISOString();
   const row = await getD1()
     .prepare(
@@ -59,6 +65,8 @@ export async function recordAdminLoginFailure(
              THEN admin_login_limits.failures
            WHEN excluded.window_started_at - admin_login_limits.window_started_at >= ${WINDOW_MS}
              THEN 1
+           WHEN admin_login_limits.failures >= ${MAX_FAILURES}
+             THEN admin_login_limits.failures
            ELSE admin_login_limits.failures + 1
          END,
          window_started_at = CASE
@@ -73,7 +81,7 @@ export async function recordAdminLoginFailure(
              THEN admin_login_limits.locked_until
            WHEN excluded.window_started_at - admin_login_limits.window_started_at >= ${WINDOW_MS}
              THEN NULL
-           WHEN admin_login_limits.failures + 1 >= ${MAX_FAILURES}
+           WHEN admin_login_limits.failures >= ${MAX_FAILURES}
              THEN excluded.window_started_at + ${LOCK_MS}
            ELSE NULL
          END,
@@ -83,10 +91,30 @@ export async function recordAdminLoginFailure(
     .bind(subject, now, nowIso)
     .first<LimitRow>();
   const lockedUntil = row?.lockedUntil ?? 0;
+  const locked = !row || lockedUntil > now;
   return {
-    locked: lockedUntil > now,
-    retryAfterSeconds: Math.max(0, Math.ceil((lockedUntil - now) / 1000)),
+    allowed: !locked,
+    attemptNumber: Number(row?.failures ?? MAX_FAILURES + 1),
+    retryAfterSeconds: locked
+      ? Math.max(1, Math.ceil((lockedUntil - now) / 1000))
+      : 0,
   };
+}
+
+export async function lockAdminLogin(
+  subject: string,
+  now = Date.now(),
+): Promise<{ retryAfterSeconds: number }> {
+  const lockedUntil = now + LOCK_MS;
+  await getD1()
+    .prepare(
+      `UPDATE admin_login_limits
+       SET locked_until = ?, updated_at = ?
+       WHERE subject = ?`,
+    )
+    .bind(lockedUntil, new Date(now).toISOString(), subject)
+    .run();
+  return { retryAfterSeconds: Math.ceil(LOCK_MS / 1000) };
 }
 
 export async function clearAdminLoginFailures(subject: string): Promise<void> {
@@ -100,11 +128,80 @@ export async function recordAdminAudit(
   subject: string,
   action: AdminAuditAction,
 ): Promise<void> {
+  const db = getD1();
+  await db.batch([
+    db
+      .prepare(
+        "INSERT INTO admin_audit_logs (id, subject, action, created_at) VALUES (?, ?, ?, ?)",
+      )
+      .bind(crypto.randomUUID(), subject, action, new Date().toISOString()),
+    db
+      .prepare(
+        `DELETE FROM admin_audit_logs
+         WHERE subject = ?
+           AND id NOT IN (
+             SELECT id FROM admin_audit_logs
+             WHERE subject = ?
+             ORDER BY created_at DESC, id DESC
+             LIMIT 100
+           )`,
+      )
+      .bind(subject, subject),
+  ]);
+}
+
+export async function saveAdminSession(
+  subject: string,
+  nonce: string,
+  expiresAt: number,
+): Promise<void> {
+  const db = getD1();
+  const now = Math.floor(Date.now() / 1000);
+  await db.batch([
+    db
+      .prepare(
+        `DELETE FROM admin_sessions
+         WHERE expires_at <= ? OR revoked_at IS NOT NULL`,
+      )
+      .bind(now),
+    db
+      .prepare(
+        `INSERT INTO admin_sessions
+          (nonce, subject, expires_at, revoked_at, created_at)
+         VALUES (?, ?, ?, NULL, ?)`,
+      )
+      .bind(nonce, subject, expiresAt, new Date().toISOString()),
+  ]);
+}
+
+export async function isAdminSessionActive(
+  subject: string,
+  nonce: string,
+  now = Math.floor(Date.now() / 1000),
+): Promise<boolean> {
+  const row = await getD1()
+    .prepare(
+      `SELECT nonce FROM admin_sessions
+       WHERE nonce = ? AND subject = ?
+         AND revoked_at IS NULL AND expires_at > ?`,
+    )
+    .bind(nonce, subject, now)
+    .first<{ nonce: string }>();
+  return row?.nonce === nonce;
+}
+
+export async function revokeAdminSession(
+  subject: string,
+  nonce: string,
+  now = Math.floor(Date.now() / 1000),
+): Promise<void> {
   await getD1()
     .prepare(
-      "INSERT INTO admin_audit_logs (id, subject, action, created_at) VALUES (?, ?, ?, ?)",
+      `UPDATE admin_sessions
+       SET revoked_at = ?
+       WHERE nonce = ? AND subject = ? AND revoked_at IS NULL`,
     )
-    .bind(crypto.randomUUID(), subject, action, new Date().toISOString())
+    .bind(now, nonce, subject)
     .run();
 }
 
@@ -117,19 +214,30 @@ export async function getAdminOverview(subject: string): Promise<
     db
       .prepare(
         `SELECT
-          (SELECT COUNT(*) FROM (
-            SELECT owner_id FROM tasks
-            UNION SELECT owner_id FROM notes
-            UNION SELECT owner_id FROM events
-          )) AS spacesWithContent,
-          (SELECT COUNT(*) FROM tasks) AS tasks,
-          (SELECT COUNT(*) FROM tasks WHERE status != 'done') AS openTasks,
-          (SELECT COUNT(*) FROM tasks WHERE status = 'done') AS completedTasks,
-          (SELECT COUNT(*) FROM notes) AS notes,
-          (SELECT COUNT(*) FROM events) AS events,
-          (SELECT COUNT(*) FROM admin_login_limits WHERE locked_until > ?) AS blockedLogins`,
+          CASE WHEN
+            EXISTS(SELECT 1 FROM tasks WHERE owner_id = ?)
+            OR EXISTS(SELECT 1 FROM notes WHERE owner_id = ?)
+            OR EXISTS(SELECT 1 FROM events WHERE owner_id = ?)
+          THEN 1 ELSE 0 END AS spacesWithContent,
+          (SELECT COUNT(*) FROM tasks WHERE owner_id = ?) AS tasks,
+          (SELECT COUNT(*) FROM tasks WHERE owner_id = ? AND status != 'done') AS openTasks,
+          (SELECT COUNT(*) FROM tasks WHERE owner_id = ? AND status = 'done') AS completedTasks,
+          (SELECT COUNT(*) FROM notes WHERE owner_id = ?) AS notes,
+          (SELECT COUNT(*) FROM events WHERE owner_id = ?) AS events,
+          (SELECT COUNT(*) FROM admin_login_limits WHERE subject = ? AND locked_until > ?) AS blockedLogins`,
       )
-      .bind(now)
+      .bind(
+        subject,
+        subject,
+        subject,
+        subject,
+        subject,
+        subject,
+        subject,
+        subject,
+        subject,
+        now,
+      )
       .first<MetricsRow>(),
     db
       .prepare(

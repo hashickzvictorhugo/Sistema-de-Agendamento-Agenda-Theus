@@ -31,7 +31,7 @@ interface D1Database {
 declare module "cloudflare:workers" {
   export const env: {
     DB?: D1Database;
-    ADMIN_OWNER_EMAIL?: string;
+    ADMIN_OWNER_USER_ID?: string;
     ADMIN_PASSWORD_HASH?: string;
     ADMIN_SESSION_SECRET?: string;
   };

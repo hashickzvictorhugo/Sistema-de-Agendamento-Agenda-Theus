@@ -1,20 +1,10 @@
 import { getChatGPTUser } from "../app/chatgpt-auth";
+export { isStrictSameOrigin } from "./request-security";
 
 const MAX_BODY_BYTES = 64 * 1024;
 
 export async function getApiUser() {
   return getChatGPTUser();
-}
-
-export function isTrustedMutation(request: Request): boolean {
-  const origin = request.headers.get("origin");
-  if (!origin) return true;
-
-  try {
-    return new URL(origin).origin === new URL(request.url).origin;
-  } catch {
-    return false;
-  }
 }
 
 export async function readJsonBody<T>(request: Request): Promise<T | null> {
@@ -52,17 +42,6 @@ export function apiJson(
       ...headers,
     },
   });
-}
-
-export function isStrictSameOrigin(request: Request): boolean {
-  const origin = request.headers.get("origin");
-  if (!origin) return false;
-
-  try {
-    return new URL(origin).origin === new URL(request.url).origin;
-  } catch {
-    return false;
-  }
 }
 
 export function isShortText(

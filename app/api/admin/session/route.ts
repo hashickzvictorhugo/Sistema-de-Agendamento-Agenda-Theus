@@ -4,12 +4,16 @@ import {
   createAdminSession,
   isConfiguredAdmin,
   verifyAdminPassword,
+  verifyAdminSession,
 } from "../../../../lib/admin-auth";
 import {
   clearAdminLoginFailures,
   getAdminLock,
+  lockAdminLogin,
   recordAdminAudit,
-  recordAdminLoginFailure,
+  reserveAdminLoginAttempt,
+  revokeAdminSession,
+  saveAdminSession,
 } from "../../../../db/admin";
 import {
   apiJson,
@@ -33,29 +37,39 @@ export async function POST(request: Request): Promise<Response> {
   const body = await readJsonBody<LoginBody>(request);
   if (!body) return apiJson({ error: "Solicitação inválida." }, 400);
 
-  const currentLock = await getAdminLock(user.userId);
-  if (currentLock.locked) {
+  const attempt = await reserveAdminLoginAttempt(user.userId);
+  if (!attempt.allowed) {
     return apiJson(
       { error: "Muitas tentativas. Aguarde alguns minutos e tente novamente." },
       429,
-      { "Retry-After": String(currentLock.retryAfterSeconds) },
+      { "Retry-After": String(attempt.retryAfterSeconds) },
     );
   }
 
   if (!(await verifyAdminPassword(body.password))) {
-    const nextLock = await recordAdminLoginFailure(user.userId);
     await recordAdminAudit(user.userId, "login_failure");
-    if (nextLock.locked) {
+    if (attempt.attemptNumber >= 5) {
+      const lock = await lockAdminLogin(user.userId);
       return apiJson(
         { error: "Muitas tentativas. Aguarde alguns minutos e tente novamente." },
         429,
-        { "Retry-After": String(nextLock.retryAfterSeconds) },
+        { "Retry-After": String(lock.retryAfterSeconds) },
       );
     }
     return apiJson({ error: "Não foi possível liberar o painel." }, 401);
   }
 
+  const finalLock = await getAdminLock(user.userId);
+  if (finalLock.locked) {
+    return apiJson(
+      { error: "Muitas tentativas. Aguarde alguns minutos e tente novamente." },
+      429,
+      { "Retry-After": String(finalLock.retryAfterSeconds) },
+    );
+  }
+
   const session = await createAdminSession(user.userId);
+  await saveAdminSession(user.userId, session.nonce, session.expiresAt);
   await clearAdminLoginFailures(user.userId);
   await recordAdminAudit(user.userId, "login_success");
   return apiJson(
@@ -75,7 +89,11 @@ export async function DELETE(request: Request): Promise<Response> {
     return apiJson({ error: "Origem da solicitação não permitida." }, 403);
   }
 
-  await recordAdminAudit(user.userId, "logout");
+  const session = await verifyAdminSession(request, user.userId).catch(() => null);
+  if (session) {
+    await revokeAdminSession(user.userId, session.nonce).catch(() => undefined);
+    await recordAdminAudit(user.userId, "logout").catch(() => undefined);
+  }
   return apiJson(
     { unlocked: false },
     200,

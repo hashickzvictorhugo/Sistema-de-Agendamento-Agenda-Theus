@@ -1,11 +1,11 @@
-/** Cloudflare Worker entry point for the vinext-starter template. */
+/** Cloudflare Worker entry point for THEUS. */
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
 
 interface Env {
   ASSETS: Fetcher;
   DB: D1Database;
-  ADMIN_OWNER_EMAIL?: string;
+  ADMIN_OWNER_USER_ID?: string;
   ADMIN_PASSWORD_HASH?: string;
   ADMIN_SESSION_SECRET?: string;
   IMAGES: {
@@ -48,6 +48,14 @@ const worker = {
     securedResponse.headers.set("X-Content-Type-Options", "nosniff");
     securedResponse.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
     securedResponse.headers.set("X-Frame-Options", "DENY");
+    securedResponse.headers.set(
+      "Content-Security-Policy",
+      "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data: blob: https:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; upgrade-insecure-requests",
+    );
+    securedResponse.headers.set(
+      "Strict-Transport-Security",
+      "max-age=31536000; includeSubDomains",
+    );
     securedResponse.headers.set(
       "Permissions-Policy",
       "camera=(), microphone=(), geolocation=()",
